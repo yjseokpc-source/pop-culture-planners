@@ -364,6 +364,8 @@ function applyFilters() {
       + (view.filtered.length
         ? '인허가 목록에서 이름이 같은 업체를 표시합니다 (동명의 다른 업체일 수 있음).'
         : '인허가 목록에는 같은 이름의 업체가 없습니다. 국세청 사업자 상태 탭에서 확인하세요.');
+  } else if (current === 'nts' && view.excludedClosed) {
+    note = ` · 기획업이 폐업 상태인 ${view.excludedClosed.toLocaleString('ko-KR')}곳은 조회 대상에서 제외`;
   } else if (current === 'permit' && looksLikeNumber && views.nts.rows.length) {
     note = lock.on ? ' · 번호 목록에 없는 사업자번호입니다.' : ' · 사업자번호 검색은 위 "사업자번호 조회"에서 잠금 해제 후 사용할 수 있습니다.';
   }
@@ -458,6 +460,7 @@ async function init() {
 
   views.permit.rows = permit.items;
   views.nts.rows = nts ? nts.items : [];
+  views.nts.excludedClosed = nts ? nts.excludedClosed || 0 : 0;
   for (const view of Object.values(views)) for (const r of view.rows) r._text = norm(view.text(r));
   for (const r of views.permit.rows) r._key = nameKey(r.BPLC_NM);
   $('meta').textContent = `행정안전부 인허가 데이터${nts ? ' · 국세청 사업자등록 상태' : ''} 기준 · 마지막 확인 ${permit.checkedAt} · 매일 자동 갱신`

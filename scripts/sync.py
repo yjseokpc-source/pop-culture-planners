@@ -85,6 +85,12 @@ EXCLUDE_LICENSED_FROM = "20260701"
 # 국세청 조회 결과 중 변동을 감시할 항목
 NTS_WATCH_FIELDS = {"status": "사업자 상태", "tax": "과세유형"}
 
+# 기획업(인허가) 영업상태가 이 값뿐인 업체는 국세청 조회 대상에서 뺀다. 비우면 전부 조회한다.
+NTS_SKIP_PERMIT_STATUS = {"폐업"}
+# 폐업 여부를 판단할 때 무시하는 인허가 상태 (다른 지자체로 옮기면서 남은 옛 기록)
+NTS_IGNORE_PERMIT_STATUS = {"제외/삭제/전출"}
+CORP_WORDS = re.compile(r"주식회사|유한책임회사|유한회사|농업회사법인|사단법인|재단법인|\(주\)|㈜|\(유\)|\(사\)|\(재\)")
+
 
 class SyncError(Exception):
     pass
@@ -263,7 +269,26 @@ def fetch_nts_batch(url, numbers, label):
     raise SyncError(f"국세청 조회 실패 ({label}): {last_error}")
 
 
-def sync_nts(date):
+def name_key(name):
+    """두 목록의 업체를 이름으로 연결하는 키 (법인 표기·공백·기호 무시). index.html 의 nameKey 와 같은 규칙."""
+    return re.sub(r"[^0-9a-z가-힣]", "", CORP_WORDS.sub(" ", name).lower())
+
+
+def permit_closed_keys(planners):
+    """기획업(인허가)이 폐업 상태인 업체명 키.
+
+    같은 이름의 인허가 등록이 모두 폐업일 때만 해당한다. 폐업 후 재등록했거나 동명의 다른 업체가
+    영업 중이면 제외하지 않는다. 다른 지자체로 옮긴 기록(전출)은 판단에서 뺀다.
+    """
+    statuses = {}
+    for row in planners.values():
+        status = row.get("SALS_STTS_NM", "")
+        if status not in NTS_IGNORE_PERMIT_STATUS:
+            statuses.setdefault(name_key(row.get("BPLC_NM", "")), set()).add(status)
+    return {key for key, found in statuses.items() if key and found <= NTS_SKIP_PERMIT_STATUS}
+
+
+def sync_nts(date, planners):
     """국세청 상태를 조회해 직전 결과와 비교한다. 사업자번호 목록 파일이 없으면 None."""
     if not bizlist.ENC_FILE.exists():
         return None
@@ -275,10 +300,16 @@ def sync_nts(date):
     except ValueError as e:
         raise SyncError(str(e))
 
+    # 기획업이 폐업 상태인 업체는 국세청 상태를 볼 필요가 없으므로 조회 대상에서 뺀다
+    closed = permit_closed_keys(planners)
+    listed = len(entries)
+    entries = [e for e in entries if name_key(e["name"]) not in closed]
+    skipped = listed - len(entries)
+
     key = normalize_key(os.environ.get("NTS_API_KEY") or os.environ.get("DATA_GO_KR_KEY", ""))
     url = f"{NTS_URL}?{urllib.parse.urlencode({'serviceKey': key})}"
     batches = math.ceil(len(entries) / NTS_BATCH)
-    print(f"국세청 조회 {len(entries):,}건 / {batches}회")
+    print(f"국세청 조회 {len(entries):,}건 / {batches}회" + (f" (기획업 폐업 {skipped:,}건 제외)" if skipped else ""))
 
     rows, numbers = {}, {}
     for index in range(batches):
@@ -319,7 +350,7 @@ def sync_nts(date):
             if changes:
                 events.append({"date": date, "id": key_id, "name": row.get("name", ""), "source": "nts",
                                "type": "changed", "changes": changes})
-    return {"rows": rows, "events": events, "baseline": baseline, "numbers": numbers}
+    return {"rows": rows, "events": events, "baseline": baseline, "numbers": numbers, "skipped": skipped}
 
 
 def count_by(rows, field):
@@ -355,7 +386,7 @@ def save(rows, nts, events, now):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     write_snapshot(SNAPSHOT, rows, now, excludedFrom=fmt_date(EXCLUDE_LICENSED_FROM))
     if nts:
-        write_snapshot(NTS_SNAPSHOT, nts["rows"], now)
+        write_snapshot(NTS_SNAPSHOT, nts["rows"], now, excludedClosed=nts["skipped"])
     history = json.loads(CHANGELOG.read_text(encoding="utf-8")) if CHANGELOG.exists() else []
     history = (events + history)[:CHANGELOG_LIMIT]
     CHANGELOG.write_text("[\n%s\n]\n" % dump_lines(history) if history else "[]\n", encoding="utf-8")
@@ -531,7 +562,7 @@ def main():
     # 2) 국세청 사업자 상태. 여기서 실패해도 인허가 쪽 알림은 그대로 보낸다.
     nts, nts_error = None, None
     try:
-        nts = sync_nts(date)
+        nts = sync_nts(date, new)
     except SyncError as e:
         nts_error = str(e)
         print(f"::error::{e}")
