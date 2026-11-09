@@ -7,6 +7,8 @@ name: 기획업 데이터 동기화
 #             SMTP_USER       보내는 메일 계정 (예: Gmail 주소)
 #             SMTP_PASS       메일 비밀번호 (Gmail은 '앱 비밀번호' 16자리)
 #             MAIL_TO         받는 사람 (여러 명이면 쉼표로 구분)
+#             BIZNO_PASSPHRASE  사업자번호 목록(private/biznos.enc) 암호. 국세청 상태 조회에 필요
+#             NTS_API_KEY     (선택) 국세청 API 인증키가 DATA_GO_KR_KEY 와 다를 때만
 #   Variables SITE_URL        (선택) 메일에 넣을 조회 페이지 주소
 #             SMTP_HOST / SMTP_PORT  (선택) Gmail이 아닐 때만. 기본 smtp.gmail.com / 465
 
@@ -32,6 +34,8 @@ jobs:
       - name: 동기화 및 변동 알림
         env:
           DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+          NTS_API_KEY: ${{ secrets.NTS_API_KEY }}
+          BIZNO_PASSPHRASE: ${{ secrets.BIZNO_PASSPHRASE }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
@@ -40,7 +44,9 @@ jobs:
           SITE_URL: ${{ vars.SITE_URL }}
         run: python3 scripts/sync.py
 
+      # 국세청 조회만 실패한 경우에도 인허가 쪽 결과는 저장되어 있으므로 커밋한다.
       - name: 데이터 커밋
+        if: success() || failure()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

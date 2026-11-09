@@ -47,12 +47,17 @@
   details.changes summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   details.changes summary h2 { display: inline; }
   ul.events { list-style: none; margin: 12px 0 0; padding: 0; }
-  ul.events li { display: grid; grid-template-columns: 92px 76px 1fr; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; align-items: baseline; }
+  ul.events li { display: grid; grid-template-columns: 92px 132px 1fr; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; align-items: baseline; }
   ul.events .when { color: var(--muted); font-variant-numeric: tabular-nums; }
   ul.events .what { min-width: 0; }
-  ul.events .name { font-weight: 600; cursor: pointer; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; background: none; border: 0; padding: 0; text-align: left; }
+  .linklike { font-weight: 600; cursor: pointer; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; background: none; border: 0; padding: 0; text-align: left; }
   .more { margin-top: 12px; }
   @media (max-width: 560px) { ul.events li { grid-template-columns: auto 1fr; } ul.events .what { grid-column: 1 / -1; } }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .tabs button { border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none; padding: 10px 14px; color: var(--muted); font-weight: 600; }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .tabs .n { font-weight: 400; font-size: 13px; margin-left: 4px; }
 
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -73,6 +78,7 @@
   dl.fields { display: grid; grid-template-columns: minmax(120px, max-content) 1fr; gap: 4px 16px; margin: 0; font-size: 13px; }
   dl.fields dt { color: var(--muted); }
   dl.fields dd { margin: 0; word-break: break-all; }
+  .detail-actions { margin-top: 12px; font-size: 13px; }
   .empty { text-align: center; color: var(--muted); padding: 32px 0; }
   #sentinel { height: 1px; }
   [hidden] { display: none !important; }
@@ -92,23 +98,21 @@
   </details>
 
   <div id="listArea" hidden>
+    <div class="tabs" id="tabs" role="tablist" hidden></div>
+
     <form class="card" id="form" role="search">
       <div class="row">
         <div class="grow">
-          <label for="q">검색 (사업장명 · 주소 · 전화번호)</label>
-          <input id="q" type="search" placeholder="예: 엔터테인먼트, 강남구">
+          <label for="q" id="qLabel">검색</label>
+          <input id="q" type="search">
         </div>
         <div>
-          <label for="stts">영업상태</label>
-          <select id="stts"><option value="">전체</option></select>
+          <label for="stts" id="sttsLabel">상태</label>
+          <select id="stts"></select>
         </div>
         <div>
           <label for="sort">정렬</label>
-          <select id="sort">
-            <option value="licensed">인허가일 최신순</option>
-            <option value="updated">최근 수정순</option>
-            <option value="name">사업장명순</option>
-          </select>
+          <select id="sort"></select>
         </div>
       </div>
     </form>
@@ -118,11 +122,11 @@
     <div class="card">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>사업장명</th><th>영업상태</th><th>인허가일자</th><th>폐업일자</th><th>소재지</th><th>전화</th></tr></thead>
+          <thead><tr id="head"></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
-      <div class="empty" id="empty" hidden>조건에 맞는 기획업 등록 정보가 없습니다.</div>
+      <div class="empty" id="empty" hidden>조건에 맞는 정보가 없습니다.</div>
       <div id="sentinel"></div>
     </div>
   </div>
@@ -130,12 +134,10 @@
 
 <script>
 // 데이터는 scripts/sync.py 가 매일 갱신하는 정적 파일에서 읽는다 (브라우저에서 API를 직접 호출하지 않음).
-const DATA_URL = 'data/planners.json';
-const CHANGES_URL = 'data/changes.json';
 const BATCH = 200;        // 스크롤할 때마다 추가로 그리는 행 수
 const EVENTS_STEP = 20;
 
-const LABELS = {
+const PERMIT_LABELS = {
   BPLC_NM: '사업장명', SALS_STTS_CD: '영업상태코드', SALS_STTS_NM: '영업상태',
   DTL_SALS_STTS_CD: '상세영업상태코드', DTL_SALS_STTS_NM: '상세영업상태',
   LCPMT_YMD: '인허가일자', LCPMT_RTRCN_YMD: '인허가취소일자', CLSBIZ_YMD: '폐업일자',
@@ -146,7 +148,6 @@ const LABELS = {
 };
 
 const $ = (id) => document.getElementById(id);
-const state = { all: [], filtered: [], shown: 0, events: [], eventsShown: 0 };
 
 function el(tag, props = {}, ...children) {
   const node = Object.assign(document.createElement(tag), props);
@@ -162,129 +163,176 @@ function fmtStamp(v) {
   const s = String(v ?? '');
   return /^\d{14}$/.test(s) ? `${fmtDate(s.slice(0, 8))} ${s.slice(8, 10)}:${s.slice(10, 12)}` : s;
 }
-function fmtField(key, value) {
-  if (/_YMD$/.test(key)) return fmtDate(value);
-  if (/_PNT$/.test(key)) return fmtStamp(value);
-  return String(value);
-}
 
 function badgeClass(name) {
   if (/폐업|취소|말소|만료/.test(name)) return 'bad';
   if (/휴업|정지|중지/.test(name)) return 'warn';
-  if (/영업|정상/.test(name)) return 'ok';
+  if (/영업|정상|계속/.test(name)) return 'ok';
   return 'neutral';
 }
+const badge = (name) => el('span', { className: `badge ${badgeClass(name)}` }, name);
 const norm = (s) => String(s ?? '').toLowerCase().replace(/\s+/g, '');
+// '(주)가나', '주식회사 가나' 처럼 표기가 달라도 서로 찾을 수 있게 법인 표기를 뗀 이름
+const coreName = (s) => String(s ?? '')
+  .replace(/주식회사|유한책임회사|유한회사|농업회사법인|\(주\)|㈜|\(유\)|\(사\)|\(재\)/g, ' ').trim();
 
-/* ---------- 목록 ---------- */
-function rowNode(row) {
-  const stts = row.SALS_STTS_NM || '';
-  const dtl = row.DTL_SALS_STTS_NM || '';
-  const label = stts || dtl || '-';
-  const tr = el('tr', { className: 'item', title: '클릭하면 전체 항목을 볼 수 있습니다' },
-    el('td', { className: 'name' }, row.BPLC_NM || '-'),
-    el('td', {},
-      el('span', { className: `badge ${badgeClass(label)}` }, label),
-      dtl && dtl !== stts ? el('div', { className: 'small' }, dtl) : null),
-    el('td', { className: 'nowrap' }, fmtDate(row.LCPMT_YMD) || '-'),
-    el('td', { className: 'nowrap' }, fmtDate(row.CLSBIZ_YMD) || '-'),
-    el('td', {}, row.ROAD_NM_ADDR || row.LOTNO_ADDR || '-'),
-    el('td', { className: 'nowrap' }, row.TELNO || '-'),
-  );
+/* ---------- 두 목록(탭)의 정의 ---------- */
+const views = {
+  permit: {
+    tab: '인허가 등록 현황', url: 'data/planners.json', rows: [],
+    qLabel: '검색 (사업장명 · 주소 · 전화번호)', placeholder: '예: 엔터테인먼트, 강남구', sttsLabel: '영업상태',
+    head: ['사업장명', '영업상태', '인허가일자', '폐업일자', '소재지', '전화'],
+    status: (r) => r.SALS_STTS_NM || '',
+    text: (r) => [r.BPLC_NM, r.ROAD_NM_ADDR, r.LOTNO_ADDR, r.TELNO].join(' '),
+    sorts: {
+      licensed: ['인허가일 최신순', (a, b) => (b.LCPMT_YMD || '').localeCompare(a.LCPMT_YMD || '')],
+      updated: ['최근 수정순', (a, b) => (b.LAST_MDFCN_PNT || b.DAT_UPDT_PNT || '').localeCompare(a.LAST_MDFCN_PNT || a.DAT_UPDT_PNT || '')],
+      name: ['사업장명순', (a, b) => (a.BPLC_NM || '').localeCompare(b.BPLC_NM || '', 'ko')],
+    },
+    cells: (r) => {
+      const stts = r.SALS_STTS_NM || '', dtl = r.DTL_SALS_STTS_NM || '';
+      return [
+        el('td', { className: 'name' }, r.BPLC_NM || '-'),
+        el('td', {}, badge(stts || dtl || '-'), dtl && dtl !== stts ? el('div', { className: 'small' }, dtl) : null),
+        el('td', { className: 'nowrap' }, fmtDate(r.LCPMT_YMD) || '-'),
+        el('td', { className: 'nowrap' }, fmtDate(r.CLSBIZ_YMD) || '-'),
+        el('td', {}, r.ROAD_NM_ADDR || r.LOTNO_ADDR || '-'),
+        el('td', { className: 'nowrap' }, r.TELNO || '-'),
+      ];
+    },
+    fields: (r) => Object.entries(r)
+      .filter(([k, v]) => !k.startsWith('_') && v != null && v !== '')
+      .map(([k, v]) => [PERMIT_LABELS[k] || k, /_YMD$/.test(k) ? fmtDate(v) : /_PNT$/.test(k) ? fmtStamp(v) : String(v)]),
+    name: (r) => r.BPLC_NM, other: 'nts', otherLabel: '국세청 사업자 상태에서 같은 이름 찾기',
+  },
+  nts: {
+    tab: '국세청 사업자 상태', url: 'data/nts.json', rows: [],
+    qLabel: '검색 (기업명)', placeholder: '예: 엔터테인먼트', sttsLabel: '사업자 상태',
+    head: ['기업명', '사업자 상태', '과세유형', '폐업일자'],
+    status: (r) => r.status || '',
+    text: (r) => r.name,
+    sorts: {
+      name: ['기업명순', (a, b) => (a.name || '').localeCompare(b.name || '', 'ko')],
+      end: ['폐업일 최신순', (a, b) => (b.end || '').localeCompare(a.end || '')],
+    },
+    cells: (r) => [
+      el('td', { className: 'name' }, r.name || '-'),
+      el('td', {}, badge(r.status || '-')),
+      el('td', {}, r.tax || '-'),
+      el('td', { className: 'nowrap' }, fmtDate(r.end) || '-'),
+    ],
+    fields: (r) => [['기업명', r.name], ['사업자 상태', r.status], ['과세유형', r.tax], ['폐업일자', fmtDate(r.end)]]
+      .filter(([, v]) => v),
+    name: (r) => r.name, other: 'permit', otherLabel: '인허가 등록 현황에서 같은 이름 찾기',
+  },
+};
+for (const v of Object.values(views)) Object.assign(v, { q: '', stts: '', sort: Object.keys(v.sorts)[0], filtered: [], shown: 0 });
+let current = 'permit';
+
+/* ---------- 목록 그리기 ---------- */
+function rowNode(view, row) {
+  const tr = el('tr', { className: 'item', title: '클릭하면 전체 항목을 볼 수 있습니다' }, ...view.cells(row));
   let detail = null;
   tr.onclick = () => {
     if (detail) { detail.remove(); detail = null; return; }
     const dl = el('dl', { className: 'fields' });
-    for (const [k, v] of Object.entries(row)) {
-      if (k.startsWith('_') || v == null || v === '') continue;
-      dl.append(el('dt', {}, LABELS[k] || k), el('dd', {}, fmtField(k, v)));
+    for (const [label, value] of view.fields(row)) dl.append(el('dt', {}, label), el('dd', {}, value));
+    const cell = el('td', { colSpan: view.head.length }, dl);
+    if (views[view.other].rows.length) {
+      const jump = el('button', { className: 'linklike', type: 'button' }, view.otherLabel);
+      jump.onclick = (e) => { e.stopPropagation(); openIn(view.other, coreName(view.name(row))); };
+      cell.append(el('div', { className: 'detail-actions' }, jump,
+        el('span', { className: 'small' }, ' (이름이 같은 다른 업체일 수 있습니다)')));
     }
-    detail = el('tr', { className: 'detail' }, el('td', { colSpan: 6 }, dl));
+    detail = el('tr', { className: 'detail' }, cell);
     tr.after(detail);
   };
   return tr;
 }
 
 function renderMore() {
-  const next = state.filtered.slice(state.shown, state.shown + BATCH);
+  const view = views[current];
+  const next = view.filtered.slice(view.shown, view.shown + BATCH);
   if (!next.length) return;
-  $('rows').append(...next.map(rowNode));
-  state.shown += next.length;
+  $('rows').append(...next.map((r) => rowNode(view, r)));
+  view.shown += next.length;
 }
-
-const SORTS = {
-  licensed: (a, b) => (b.LCPMT_YMD || '').localeCompare(a.LCPMT_YMD || ''),
-  updated: (a, b) => (b.LAST_MDFCN_PNT || b.DAT_UPDT_PNT || '').localeCompare(a.LAST_MDFCN_PNT || a.DAT_UPDT_PNT || ''),
-  name: (a, b) => (a.BPLC_NM || '').localeCompare(b.BPLC_NM || '', 'ko'),
-};
 
 function applyFilters() {
-  const q = norm($('q').value);
-  const stts = $('stts').value;
-  state.filtered = state.all
-    .filter((r) => (!stts || (r.SALS_STTS_NM || '') === stts) && (!q || r._text.includes(q)))
-    .sort(SORTS[$('sort').value]);
-  state.shown = 0;
+  const view = views[current];
+  view.q = $('q').value; view.stts = $('stts').value; view.sort = $('sort').value;
+  const q = norm(view.q);
+  view.filtered = view.rows
+    .filter((r) => (!view.stts || view.status(r) === view.stts) && (!q || r._text.includes(q)))
+    .sort(view.sorts[view.sort][1]);
+  view.shown = 0;
   $('rows').replaceChildren();
   renderMore();
-  $('empty').hidden = state.filtered.length > 0;
-  const total = state.all.length.toLocaleString('ko-KR');
-  const hit = state.filtered.length.toLocaleString('ko-KR');
-  $('count').textContent = state.filtered.length === state.all.length ? `전체 ${total}건` : `전체 ${total}건 중 ${hit}건`;
+  $('empty').hidden = view.filtered.length > 0;
+  const total = view.rows.length.toLocaleString('ko-KR');
+  const hit = view.filtered.length.toLocaleString('ko-KR');
+  $('count').textContent = view.filtered.length === view.rows.length ? `전체 ${total}건` : `전체 ${total}건 중 ${hit}건`;
 }
 
-function setupFilters() {
+function showView(key) {
+  current = key;
+  const view = views[key];
+  for (const b of $('tabs').children) b.setAttribute('aria-selected', String(b.dataset.view === key));
+  $('qLabel').textContent = view.qLabel;
+  $('q').placeholder = view.placeholder;
+  $('sttsLabel').textContent = view.sttsLabel;
+  $('head').replaceChildren(...view.head.map((h) => el('th', {}, h)));
+
   const counts = new Map();
-  for (const r of state.all) counts.set(r.SALS_STTS_NM || '', (counts.get(r.SALS_STTS_NM || '') || 0) + 1);
-  for (const [name, n] of [...counts].sort((a, b) => b[1] - a[1])) {
-    if (name) $('stts').append(el('option', { value: name }, `${name} (${n.toLocaleString('ko-KR')})`));
-  }
-  let timer;
-  $('q').oninput = () => { clearTimeout(timer); timer = setTimeout(applyFilters, 150); };
-  $('stts').onchange = applyFilters;
-  $('sort').onchange = applyFilters;
-  $('form').onsubmit = (e) => { e.preventDefault(); applyFilters(); };
-  new IntersectionObserver((entries) => { if (entries[0].isIntersecting) renderMore(); }, { rootMargin: '600px' })
-    .observe($('sentinel'));
+  for (const r of view.rows) counts.set(view.status(r), (counts.get(view.status(r)) || 0) + 1);
+  $('stts').replaceChildren(el('option', { value: '' }, '전체'),
+    ...[...counts].filter(([name]) => name).sort((a, b) => b[1] - a[1])
+      .map(([name, n]) => el('option', { value: name }, `${name} (${n.toLocaleString('ko-KR')})`)));
+  $('sort').replaceChildren(...Object.entries(view.sorts).map(([k, [label]]) => el('option', { value: k }, label)));
+
+  $('q').value = view.q; $('stts').value = view.stts; $('sort').value = view.sort;
+  applyFilters();
+}
+
+function openIn(key, query) {
+  views[key].q = query;
+  views[key].stts = '';
+  showView(key);
+  $('listArea').scrollIntoView({ behavior: 'smooth' });
 }
 
 /* ---------- 변동사항 ---------- */
-const EVENT_TYPES = {
-  new: ['신규 등록', 'info'],
-  removed: ['목록 삭제', 'neutral'],
-};
+const events = { all: [], shown: 0 };
 
 function eventNode(e) {
-  let badge, body;
+  const source = e.source === 'nts' ? 'nts' : 'permit';
+  let tag, body;
   if (e.type === 'changed') {
-    const statusChange = e.changes.find((c) => c.field === 'SALS_STTS_NM') || e.changes.find((c) => /STTS/.test(c.field));
-    badge = statusChange ? ['상태 변경', badgeClass(statusChange.after)] : ['정보 변경', 'neutral'];
+    const statusChange = e.changes.find((c) => c.field === 'SALS_STTS_NM' || c.field === 'status') || e.changes.find((c) => /STTS/.test(c.field));
+    tag = statusChange ? ['상태 변경', badgeClass(statusChange.after)] : ['정보 변경', 'neutral'];
     body = e.changes.map((c) => `${c.label}: ${c.before || '(없음)'} → ${c.after || '(없음)'}`).join(' · ');
+  } else if (e.type === 'new') {
+    tag = ['신규 등록', 'info'];
+    body = [e.status, e.licensed && `인허가일 ${fmtDate(e.licensed)}`].filter(Boolean).join(' · ');
   } else {
-    badge = EVENT_TYPES[e.type] || [e.type, 'neutral'];
-    body = e.type === 'new'
-      ? [e.status, e.licensed && `인허가일 ${fmtDate(e.licensed)}`].filter(Boolean).join(' · ')
-      : `직전 상태: ${e.status || '-'}`;
+    tag = ['목록 삭제', 'neutral'];
+    body = `직전 상태: ${e.status || '-'}`;
   }
-  const name = el('button', { className: 'name', type: 'button', title: '이 사업장을 목록에서 찾기' }, e.name || '(이름 없음)');
-  name.onclick = () => {
-    $('q').value = e.name || '';
-    $('stts').value = '';
-    applyFilters();
-    $('form').scrollIntoView({ behavior: 'smooth' });
-  };
+  const name = el('button', { className: 'linklike', type: 'button', title: '이 업체를 목록에서 찾기' }, e.name || '(이름 없음)');
+  name.onclick = () => openIn(source, e.name || '');
   return el('li', {},
     el('span', { className: 'when' }, e.date),
-    el('span', {}, el('span', { className: `badge ${badge[1]}` }, badge[0])),
+    el('span', {}, el('span', { className: 'small' }, source === 'nts' ? '국세청 ' : '인허가 '),
+      el('span', { className: `badge ${tag[1]}` }, tag[0])),
     el('span', { className: 'what' }, name, el('div', {}, body), e.addr ? el('div', { className: 'small' }, e.addr) : null),
   );
 }
 
 function renderEvents() {
-  const next = state.events.slice(state.eventsShown, state.eventsShown + EVENTS_STEP);
+  const next = events.all.slice(events.shown, events.shown + EVENTS_STEP);
   $('events').append(...next.map(eventNode));
-  state.eventsShown += next.length;
-  $('moreEvents').hidden = state.eventsShown >= state.events.length;
+  events.shown += next.length;
+  $('moreEvents').hidden = events.shown >= events.all.length;
 }
 
 /* ---------- 시작 ---------- */
@@ -296,9 +344,9 @@ async function loadJson(url) {
 }
 
 async function init() {
-  let data, events;
+  let permit, nts, changes;
   try {
-    [data, events] = await Promise.all([loadJson(DATA_URL), loadJson(CHANGES_URL)]);
+    [permit, nts, changes] = await Promise.all([loadJson(views.permit.url), loadJson(views.nts.url), loadJson('data/changes.json')]);
   } catch (e) {
     $('notice').textContent = location.protocol === 'file:'
       ? '이 페이지는 파일을 직접 열어서는 데이터를 읽을 수 없습니다. 배포된 주소(GitHub Pages 등)로 접속해 주세요.'
@@ -306,27 +354,46 @@ async function init() {
     $('notice').hidden = false;
     return;
   }
-  if (!data) {
+  if (!permit) {
     $('notice').textContent = '아직 수집된 데이터가 없습니다. GitHub 저장소의 Actions 탭에서 "기획업 데이터 동기화"를 한 번 실행해 주세요.';
     $('notice').hidden = false;
     return;
   }
 
-  state.all = data.items;
-  for (const r of state.all) r._text = norm([r.BPLC_NM, r.ROAD_NM_ADDR, r.LOTNO_ADDR, r.TELNO].join(' '));
-  $('meta').textContent = `행정안전부 인허가 데이터(공공데이터포털) 기준 · 마지막 확인 ${data.checkedAt} · 매일 자동 갱신`;
+  views.permit.rows = permit.items;
+  views.nts.rows = nts ? nts.items : [];
+  for (const view of Object.values(views)) for (const r of view.rows) r._text = norm(view.text(r));
+  $('meta').textContent = `행정안전부 인허가 데이터${nts ? ' · 국세청 사업자등록 상태' : ''} 기준 · 마지막 확인 ${permit.checkedAt} · 매일 자동 갱신`;
 
-  state.events = events || [];
+  events.all = changes || [];
   $('changesCard').hidden = false;
-  $('changesMeta').textContent = state.events.length
-    ? `최근 ${state.events.length.toLocaleString('ko-KR')}건 · 변동 시 메일로도 알림`
+  $('changesMeta').textContent = events.all.length
+    ? `최근 ${events.all.length.toLocaleString('ko-KR')}건 · 변동 시 메일로도 알림`
     : '아직 감지된 변동이 없습니다';
   $('moreEvents').onclick = renderEvents;
   renderEvents();
 
+  if (nts) {
+    for (const [key, view] of Object.entries(views)) {
+      const tab = el('button', { type: 'button', role: 'tab' }, view.tab,
+        el('span', { className: 'n' }, view.rows.length.toLocaleString('ko-KR')));
+      tab.dataset.view = key;
+      tab.onclick = () => showView(key);
+      $('tabs').append(tab);
+    }
+    $('tabs').hidden = false;
+  }
+
+  let timer;
+  $('q').oninput = () => { clearTimeout(timer); timer = setTimeout(applyFilters, 150); };
+  $('stts').onchange = applyFilters;
+  $('sort').onchange = applyFilters;
+  $('form').onsubmit = (e) => { e.preventDefault(); applyFilters(); };
+  new IntersectionObserver((entries) => { if (entries[0].isIntersecting) renderMore(); }, { rootMargin: '600px' })
+    .observe($('sentinel'));
+
   $('listArea').hidden = false;
-  setupFilters();
-  applyFilters();
+  showView('permit');
 }
 
 init();

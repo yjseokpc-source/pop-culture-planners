@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """대중문화예술기획업 인허가 데이터 동기화 + 변동 알림 메일.
 
-1. 공공데이터포털 API에서 전체 목록을 내려받는다.
+1. 공공데이터포털 API에서 인허가 전체 목록을 내려받는다.
 2. 직전 스냅샷(data/planners.json)과 비교해 변동(상태 변경·신규·삭제)을 찾는다.
-3. 변동이 있으면 메일을 보내고, 스냅샷과 변동 이력(data/changes.json)을 갱신한다.
+3. private/biznos.enc(암호화된 사업자번호 목록)가 있으면 국세청 사업자등록 상태도 조회해
+   직전 결과(data/nts.json)와 비교한다. 공개 파일과 실행 로그에는 사업자번호를 남기지 않는다.
+4. 변동이 있으면 메일을 보내고, 스냅샷과 변동 이력(data/changes.json)을 갱신한다.
 
 표준 라이브러리만 사용한다 (Python 3.9+).
 
 환경변수
   DATA_GO_KR_KEY  공공데이터포털 인증키 (Encoding/Decoding 모두 가능)   [필수]
+  BIZNO_PASSPHRASE  사업자번호 목록 암호                                 [국세청 조회 시 필수]
+  NTS_API_KEY     국세청 API 인증키. 없으면 DATA_GO_KR_KEY 를 쓴다
   SMTP_USER       SMTP 로그인 계정 (예: Gmail 주소)                      [메일 발송 시 필수]
   SMTP_PASS       SMTP 비밀번호 (Gmail은 '앱 비밀번호')                  [메일 발송 시 필수]
   MAIL_TO         받는 사람. 여러 명이면 쉼표로 구분                     [메일 발송 시 필수]
@@ -37,11 +41,18 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bizlist  # noqa: E402
+
 API_URL = os.environ.get("API_URL") or "https://apis.data.go.kr/1741000/pop_culture_art_planners/info"
 PAGE_SIZE = 100  # API 허용 최대값
 DATA_DIR = Path(os.environ.get("DATA_DIR") or Path(__file__).resolve().parent.parent / "data")
 SNAPSHOT = DATA_DIR / "planners.json"
 CHANGELOG = DATA_DIR / "changes.json"
+NTS_URL = os.environ.get("NTS_API_URL") or "https://api.odcloud.kr/api/nts-businessman/v1/status"
+NTS_BATCH = 100          # 국세청 API 1회 최대 조회 건수
+NTS_SNAPSHOT = DATA_DIR / "nts.json"
+NTS_UNREGISTERED = "미등록(번호 확인 필요)"
 CHANGELOG_LIMIT = 2000   # 변동 이력 보관 건수
 MAIL_ROW_LIMIT = 300     # 메일 한 구역에 싣는 최대 건수
 KST = timezone(timedelta(hours=9))
@@ -65,6 +76,9 @@ WATCH_FIELDS = {
     "TELNO": "전화번호",
 }
 STATUS_FIELDS = {"SALS_STTS_NM", "DTL_SALS_STTS_NM"}
+
+# 국세청 조회 결과 중 변동을 감시할 항목
+NTS_WATCH_FIELDS = {"status": "사업자 상태", "tax": "과세유형"}
 
 
 class SyncError(Exception):
@@ -191,11 +205,113 @@ def diff(old, new, date):
 
 
 def split_events(events):
-    status = [e for e in events if e["type"] == "changed" and any(c["field"] in STATUS_FIELDS for c in e["changes"])]
+    """인허가 변동을 종류별로 나눈다. 국세청 변동(source == 'nts')은 여기서 다루지 않는다."""
+    events = [e for e in events if e.get("source") != "nts"]
+    status =[e for e in events if e["type"] == "changed" and any(c["field"] in STATUS_FIELDS for c in e["changes"])]
     other = [e for e in events if e["type"] == "changed" and e not in status]
     new = [e for e in events if e["type"] == "new"]
     removed = [e for e in events if e["type"] == "removed"]
     return status, other, new, removed
+
+
+# ---------------------------------------------------------------- 국세청
+
+def fetch_nts_batch(url, numbers, label):
+    """사업자번호 묶음의 상태를 조회한다. 오류 메시지에 사업자번호가 섞이지 않게 한다 (실행 로그가 공개됨)."""
+    request = urllib.request.Request(
+        url, data=json.dumps({"b_no": numbers}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "planner-sync/1.0"},
+    )
+    last_error = None
+    for attempt in range(4):
+        if attempt:
+            time.sleep(3 * attempt)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode("utf-8", "replace"))
+                message = str(body.get("msg") or body.get("status_code") or f"HTTP {e.code}")
+            except ValueError:
+                message = f"HTTP {e.code}"
+            if e.code in (400, 401, 403):
+                raise SyncError(f"국세청 API 호출 거부: {message}")
+            last_error = message
+            continue
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            last_error = type(e).__name__
+            continue
+        rows = payload.get("data")
+        if payload.get("status_code") == "OK" and isinstance(rows, list) and len(rows) == len(numbers):
+            return rows
+        last_error = f"응답 상태 {payload.get('status_code')}"
+    raise SyncError(f"국세청 조회 실패 ({label}): {last_error}")
+
+
+def sync_nts(date):
+    """국세청 상태를 조회해 직전 결과와 비교한다. 사업자번호 목록 파일이 없으면 None."""
+    if not bizlist.ENC_FILE.exists():
+        return None
+    secret = bizlist.passphrase()
+    if not secret:
+        raise SyncError("사업자번호 목록은 있는데 BIZNO_PASSPHRASE 가 없습니다.")
+    try:
+        entries = bizlist.decrypt(bizlist.ENC_FILE.read_bytes(), secret)
+    except ValueError as e:
+        raise SyncError(str(e))
+
+    key = normalize_key(os.environ.get("NTS_API_KEY") or os.environ.get("DATA_GO_KR_KEY", ""))
+    url = f"{NTS_URL}?{urllib.parse.urlencode({'serviceKey': key})}"
+    batches = math.ceil(len(entries) / NTS_BATCH)
+    print(f"국세청 조회 {len(entries):,}건 / {batches}회")
+
+    rows, numbers = {}, {}
+    for index in range(batches):
+        chunk = entries[index * NTS_BATCH:(index + 1) * NTS_BATCH]
+        answers = {a.get("b_no", ""): a
+                   for a in fetch_nts_batch(url, [e["b_no"] for e in chunk], f"{index + 1}/{batches}")}
+        for entry in chunk:
+            answer = answers.get(entry["b_no"]) or {}
+            registered = bool(answer.get("b_stt"))
+            record = {
+                "id": bizlist.public_id(entry["b_no"], secret),
+                "name": entry["name"],
+                "status": answer.get("b_stt") if registered else NTS_UNREGISTERED,
+                "tax": answer.get("tax_type", "") if registered else "",
+                "end": answer.get("end_dt", ""),
+            }
+            rows[record["id"]] = {k: v for k, v in record.items() if v}
+            numbers[record["id"]] = entry["b_no"]
+        time.sleep(0.1)
+
+    old = None
+    if NTS_SNAPSHOT.exists():
+        old = {r["id"]: r for r in json.loads(NTS_SNAPSHOT.read_text(encoding="utf-8"))["items"]}
+    # 직전 결과가 없거나(첫 실행) 식별자가 하나도 겹치지 않으면(암호 교체) 비교 없이 기준만 다시 잡는다.
+    baseline = not old or not (old.keys() & rows.keys())
+    events = []
+    if not baseline:
+        for key_id, row in rows.items():
+            before = old.get(key_id)
+            if before is None:  # 목록에 새로 추가한 번호는 알림 대상이 아니다
+                continue
+            changes = [
+                {"field": f, "label": label, "before": before.get(f, ""), "after": row.get(f, "")}
+                for f, label in NTS_WATCH_FIELDS.items() if before.get(f, "") != row.get(f, "")
+            ]
+            if changes:
+                events.append({"date": date, "id": key_id, "name": row.get("name", ""), "source": "nts",
+                               "type": "changed", "changes": changes})
+    return {"rows": rows, "events": events, "baseline": baseline, "numbers": numbers}
+
+
+def count_by(rows, field):
+    counts = {}
+    for row in rows:
+        name = row.get(field) or "(상태 없음)"
+        counts[name] = counts.get(name, 0) + 1
+    return [f"{name} {count:,}건" for name, count in sorted(counts.items(), key=lambda x: -x[1])]
 
 
 # ---------------------------------------------------------------- 저장
@@ -211,14 +327,20 @@ def dump_lines(rows):
     return ",\n".join(json.dumps(r, ensure_ascii=False, separators=(",", ":")) for r in rows)
 
 
-def save(rows, events, now):
-    """한 줄에 한 건씩, 관리번호 순으로 저장해 git 변경분이 실제 변동만큼만 생기게 한다."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def write_snapshot(path, rows, now):
+    """한 줄에 한 건씩, 식별자 순으로 저장해 git 변경분이 실제 변동만큼만 생기게 한다."""
     ordered = [rows[k] for k in sorted(rows)]
-    SNAPSHOT.write_text(
+    path.write_text(
         '{"checkedAt":%s,"total":%d,"items":[\n%s\n]}\n' % (json.dumps(now), len(ordered), dump_lines(ordered)),
         encoding="utf-8",
     )
+
+
+def save(rows, nts, events, now):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    write_snapshot(SNAPSHOT, rows, now)
+    if nts:
+        write_snapshot(NTS_SNAPSHOT, nts["rows"], now)
     history = json.loads(CHANGELOG.read_text(encoding="utf-8")) if CHANGELOG.exists() else []
     history = (events + history)[:CHANGELOG_LIMIT]
     CHANGELOG.write_text("[\n%s\n]\n" % dump_lines(history) if history else "[]\n", encoding="utf-8")
@@ -239,64 +361,105 @@ def describe(event):
     return f"직전 상태: {event.get('status') or '-'}"
 
 
-def build_change_mail(events, total, date):
-    status, other, new, removed = split_events(events)
-    sections = [
-        ("영업상태 변경", status), ("기타 정보 변경", other),
-        ("신규 등록", new), ("목록에서 삭제", removed),
-    ]
-    counts = ", ".join(f"{title} {len(rows)}건" for title, rows in sections if rows)
-    subject = f"[기획업 모니터링] {date} 변동 {len(events)}건 ({counts})"
+def fmt_bizno(value):
+    return f"{value[:3]}-{value[3:5]}-{value[5:]}" if len(value) == 10 else value
 
-    text = [f"대중문화예술기획업 등록 정보에 변동이 있습니다. (전체 {total:,}건)", ""]
-    parts = [f"<p>대중문화예술기획업 등록 정보에 변동이 있습니다. (전체 {total:,}건)</p>"]
-    cell = 'style="padding:6px 10px;border:1px solid #d5d9e0;text-align:left;vertical-align:top"'
-    for title, rows in sections:
-        if not rows:
-            continue
-        shown = rows[:MAIL_ROW_LIMIT]
-        text.append(f"■ {title} ({len(rows)}건)")
-        parts.append(f'<h3 style="margin:20px 0 8px">{title} ({len(rows)}건)</h3>'
-                     '<table style="border-collapse:collapse;font-size:14px">'
-                     f"<tr><th {cell}>사업장명</th><th {cell}>내용</th><th {cell}>소재지</th></tr>")
+
+class Mail:
+    """본문을 일반 텍스트와 HTML 두 가지로 함께 쌓는다."""
+    CELL = 'style="padding:6px 10px;border:1px solid #d5d9e0;text-align:left;vertical-align:top"'
+
+    def __init__(self):
+        self.text, self.parts = [], []
+
+    def paragraph(self, line):
+        self.text += [line, ""]
+        self.parts.append(f"<p>{html.escape(line)}</p>")
+
+    def bullets(self, items):
+        self.text += [f"- {item}" for item in items] + [""]
+        self.parts.append("<ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in items) + "</ul>")
+
+    def table(self, title, events, last_header, last_value):
+        cell, shown = self.CELL, events[:MAIL_ROW_LIMIT]
+        self.text.append(f"■ {title} ({len(events)}건)")
+        self.parts.append(f'<h3 style="margin:20px 0 8px">{title} ({len(events)}건)</h3>'
+                          '<table style="border-collapse:collapse;font-size:14px">'
+                          f"<tr><th {cell}>사업장명</th><th {cell}>내용</th><th {cell}>{last_header}</th></tr>")
         for e in shown:
-            text.append(f"- {e['name']} | {describe(e)} | {e['addr']}")
-            parts.append(f"<tr><td {cell}><b>{html.escape(e['name'])}</b></td>"
-                         f"<td {cell}>{html.escape(describe(e))}</td><td {cell}>{html.escape(e['addr'])}</td></tr>")
-        parts.append("</table>")
-        if len(rows) > len(shown):
-            more = f"외 {len(rows) - len(shown)}건은 조회 페이지에서 확인하세요."
-            text.append(more)
-            parts.append(f"<p>{more}</p>")
-        text.append("")
-    return subject, text, parts
+            last = last_value(e)
+            self.text.append(f"- {e['name']} | {describe(e)} | {last}")
+            self.parts.append(f"<tr><td {cell}><b>{html.escape(e['name'])}</b></td>"
+                              f"<td {cell}>{html.escape(describe(e))}</td><td {cell}>{html.escape(last)}</td></tr>")
+        self.parts.append("</table>")
+        if len(events) > len(shown):
+            more = f"외 {len(events) - len(shown)}건은 조회 페이지에서 확인하세요."
+            self.text.append(more)
+            self.parts.append(f"<p>{more}</p>")
+        self.text.append("")
 
 
-def build_start_mail(rows, date):
-    counts = {}
-    for row in rows.values():
-        name = row.get("SALS_STTS_NM") or "(상태 없음)"
-        counts[name] = counts.get(name, 0) + 1
-    summary = [f"{name} {count:,}건" for name, count in sorted(counts.items(), key=lambda x: -x[1])]
-    subject = f"[기획업 모니터링] 모니터링을 시작했습니다 (전체 {len(rows):,}건)"
-    lead = f"{date} 기준 전체 {len(rows):,}건을 기준 목록으로 저장했습니다. 이후 변동이 생기면 이 주소로 알림 메일이 발송됩니다."
-    text = [lead, ""] + [f"- {s}" for s in summary]
-    parts = [f"<p>{lead}</p><ul>" + "".join(f"<li>{html.escape(s)}</li>" for s in summary) + "</ul>"]
-    return subject, text, parts
+def build_mail(date, planners, planner_events, first_run, nts):
+    """보낼 내용이 없으면 None, 있으면 (제목, Mail)."""
+    status, other, added, removed = split_events(planner_events)
+    nts_events = nts["events"] if nts else []
+    nts_status = [e for e in nts_events if any(c["field"] == "status" for c in e["changes"])]
+    nts_tax = [e for e in nts_events if e not in nts_status]
+
+    def addr(e):
+        return e.get("addr", "")
+
+    def number(e):  # 사업자번호는 메일에만 싣는다 (공개 파일에는 없음)
+        return fmt_bizno(nts["numbers"].get(e["id"], ""))
+
+    sections = [s for s in [
+        ("인허가 영업상태 변경", status, "소재지", addr),
+        ("인허가 기타 정보 변경", other, "소재지", addr),
+        ("인허가 신규 등록", added, "소재지", addr),
+        ("인허가 목록에서 삭제", removed, "소재지", addr),
+        ("국세청 사업자 상태 변경", nts_status, "사업자번호", number),
+        ("국세청 과세유형 변경", nts_tax, "사업자번호", number),
+    ] if s[1]]
+    changed = sum(len(s[1]) for s in sections)
+    nts_started = bool(nts and nts["baseline"])
+
+    mail = Mail()
+    if first_run:
+        subject = f"[기획업 모니터링] 모니터링을 시작했습니다 (전체 {len(planners):,}건)"
+        mail.paragraph(f"{date} 기준 인허가 전체 {len(planners):,}건을 기준 목록으로 저장했습니다. "
+                       "이후 변동이 생기면 이 주소로 알림 메일이 발송됩니다.")
+        mail.bullets(count_by(planners.values(), "SALS_STTS_NM"))
+    elif changed:
+        counts = ", ".join(f"{title} {len(rows)}건" for title, rows, _, _ in sections)
+        subject = f"[기획업 모니터링] {date} 변동 {changed}건 ({counts})"
+        mail.paragraph(f"대중문화예술기획업 등록 정보에 변동이 있습니다. (인허가 전체 {len(planners):,}건)")
+    elif nts_started:
+        subject = f"[기획업 모니터링] 국세청 사업자 상태 모니터링을 시작했습니다 ({len(nts['rows']):,}건)"
+    else:
+        return None
+
+    if nts_started:
+        mail.paragraph(f"{date} 기준 국세청 사업자등록 상태 {len(nts['rows']):,}건을 기준 목록으로 저장했습니다. "
+                       "이후 사업자 상태나 과세유형이 바뀌면 알림 메일이 발송됩니다.")
+        mail.bullets(count_by(nts["rows"].values(), "status"))
+    for section in sections:
+        mail.table(*section)
+    return subject, mail
 
 
-def make_message(subject, text, parts):
+def make_message(subject, mail):
     site = os.environ.get("SITE_URL", "").strip()
     if site:
-        text.append(f"조회 페이지: {site}")
-        parts.append(f'<p><a href="{html.escape(site)}">조회 페이지 열기</a></p>')
+        mail.text.append(f"조회 페이지: {site}")
+        mail.parts.append(f'<p><a href="{html.escape(site)}">조회 페이지 열기</a></p>')
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = os.environ.get("MAIL_FROM") or os.environ.get("SMTP_USER", "")
     message["To"] = os.environ.get("MAIL_TO", "")
-    message.set_content("\n".join(text))
+    message.set_content("\n".join(mail.text))
     message.add_alternative(
-        '<div style="font-family:\'Malgun Gothic\',sans-serif;font-size:14px;color:#16181d">%s</div>' % "".join(parts),
+        '<div style="font-family:\'Malgun Gothic\',sans-serif;font-size:14px;color:#16181d">%s</div>'
+        % "".join(mail.parts),
         subtype="html",
     )
     return message
@@ -336,24 +499,36 @@ def main():
     now = datetime.now(KST)
     date, stamp = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d %H:%M")
 
+    # 1) 인허가 목록
     old = load_snapshot()
     new = fetch_all(key)
     if old and len(new) < len(old) * 0.8:
         raise SyncError(f"목록이 비정상적으로 줄었습니다 ({len(old):,} → {len(new):,}건). 이번 실행은 반영하지 않습니다.")
-
-    if old is None:
-        events = []
+    first_run = old is None
+    events = [] if first_run else diff(old, new, date)
+    if first_run:
         print(f"첫 실행: {len(new):,}건을 기준 목록으로 저장합니다.")
-        mail = build_start_mail(new, date)
     else:
-        events = diff(old, new, date)
         status, other, added, removed = split_events(events)
-        print(f"변동 {len(events)}건 (상태 변경 {len(status)}, 기타 변경 {len(other)}, 신규 {len(added)}, 삭제 {len(removed)})")
-        for e in events[:50]:
-            print(f"  [{e['type']}] {e['name']} | {describe(e)}")
-        mail = build_change_mail(events, len(new), date) if events else None
+        print(f"인허가 변동 {len(events)}건 (상태 변경 {len(status)}, 기타 변경 {len(other)}, "
+              f"신규 {len(added)}, 삭제 {len(removed)})")
 
-    message = make_message(*mail) if mail else None
+    # 2) 국세청 사업자 상태. 여기서 실패해도 인허가 쪽 알림은 그대로 보낸다.
+    nts, nts_error = None, None
+    try:
+        nts = sync_nts(date)
+    except SyncError as e:
+        nts_error = str(e)
+        print(f"::error::{e}")
+    if nts:
+        events += nts["events"]
+        print("국세청: 기준 목록 저장" if nts["baseline"] else f"국세청 변동 {len(nts['events'])}건")
+
+    for e in events[:50]:
+        print(f"  [{e.get('source', 'permit')}:{e['type']}] {e['name']} | {describe(e)}")
+
+    built = build_mail(date, new, events, first_run, nts)
+    message = make_message(*built) if built else None
     if args.dry_run:
         if message:
             print("\n----- 메일 미리보기 -----")
@@ -365,8 +540,10 @@ def main():
     if message and mail_enabled:
         send(message)
         print(f"메일 발송 완료 → {message['To']}")
-    save(new, events, stamp)
-    print(f"저장 완료: {SNAPSHOT}")
+    save(new, nts, events, stamp)
+    print(f"저장 완료: {DATA_DIR}")
+    if nts_error:
+        raise SyncError(f"국세청 조회에 실패했습니다 (인허가 데이터는 정상 반영됨): {nts_error}")
 
 
 if __name__ == "__main__":
