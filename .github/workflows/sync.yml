@@ -27,7 +27,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40   # 국세청 조회가 10분 가까이 걸린다
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +42,7 @@ jobs:
           SMTP_HOST: ${{ vars.SMTP_HOST }}
           SMTP_PORT: ${{ vars.SMTP_PORT }}
           SITE_URL: ${{ vars.SITE_URL }}
+          PYTHONUNBUFFERED: "1"   # 진행 상황이 로그에 바로 찍히도록
         run: python3 scripts/sync.py
 
       # 국세청 조회만 실패한 경우에도 인허가 쪽 결과는 저장되어 있으므로 커밋한다.
@@ -55,5 +56,6 @@ jobs:
             echo "변경 없음"
           else
             git commit -m "data: $(TZ=Asia/Seoul date +%F) 동기화"
-            git push
+            # 실행 중에 main 이 바뀌었으면 그 위에 얹어서 다시 올린다
+            git push || (git pull --rebase origin main && git push)
           fi

@@ -283,6 +283,8 @@ def sync_nts(date):
             }
             rows[record["id"]] = {k: v for k, v in record.items() if v}
             numbers[record["id"]] = entry["b_no"]
+        if (index + 1) % 10 == 0:
+            print(f"  국세청 조회 진행 {index + 1}/{batches}")
         time.sleep(0.1)
 
     old = None
