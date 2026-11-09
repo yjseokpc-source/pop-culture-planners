@@ -27,7 +27,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 40   # 국세청 조회가 10분 가까이 걸린다
+    timeout-minutes: 40   # 보통 3~10분. 인허가 API 응답이 느린 날은 목록 수집만 6분 넘게 걸린다
     steps:
       - uses: actions/checkout@v4
 
