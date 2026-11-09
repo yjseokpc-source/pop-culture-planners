@@ -91,6 +91,19 @@
 
   <div class="notice" id="notice" hidden></div>
 
+  <details class="card changes" id="lockBox" hidden>
+    <summary><h2>사업자번호 조회</h2><span class="small" id="lockState"></span></summary>
+    <form class="row" id="lockForm" style="margin-top: 12px">
+      <div class="grow">
+        <label for="lockKey">열쇠 (담당자에게 받은 값)</label>
+        <input id="lockKey" type="password" autocomplete="off">
+      </div>
+      <button type="submit" id="lockGo">잠금 해제</button>
+      <button type="button" id="lockClear" hidden>다시 잠그기</button>
+    </form>
+    <p class="small" id="lockMsg" style="margin: 8px 0 0">사업자번호는 공개되지 않습니다. 열쇠를 입력한 브라우저에서만 번호 검색과 표시가 켜지고, 열쇠는 이 브라우저에만 저장됩니다.</p>
+  </details>
+
   <details class="card changes" id="changesCard" open hidden>
     <summary><h2>최근 변동사항</h2><span class="small" id="changesMeta"></span></summary>
     <ul class="events" id="events"></ul>
@@ -174,7 +187,70 @@ const badge = (name) => el('span', { className: `badge ${badgeClass(name)}` }, n
 const norm = (s) => String(s ?? '').toLowerCase().replace(/\s+/g, '');
 // '(주)가나', '주식회사 가나' 처럼 표기가 달라도 서로 찾을 수 있게 법인 표기를 뗀 이름
 const coreName = (s) => String(s ?? '')
-  .replace(/주식회사|유한책임회사|유한회사|농업회사법인|\(주\)|㈜|\(유\)|\(사\)|\(재\)/g, ' ').trim();
+  .replace(/주식회사|유한책임회사|유한회사|농업회사법인|사단법인|재단법인|\(주\)|㈜|\(유\)|\(사\)|\(재\)/g, ' ').trim();
+// 두 목록의 업체를 이름으로 연결할 때 쓰는 키 (법인 표기·공백·기호 무시)
+const nameKey = (s) => coreName(s).toLowerCase().replace(/[^0-9a-z가-힣]/g, '');
+const fmtBizno = (b) => (b && b.length === 10 ? `${b.slice(0, 3)}-${b.slice(3, 5)}-${b.slice(5)}` : b || '');
+
+/* ---------- 사업자번호 조회: 열쇠를 입력한 브라우저에서만 켜진다 ---------- */
+// 번호 목록은 암호화된 파일(private/biznos.enc)로만 공개되어 있고, 열쇠가 있어야 이 페이지 안에서 풀 수 있다.
+const KEY_STORE = 'planners.biznoKey';
+const lock = { on: false, entries: [], byId: new Map(), byName: new Map() };
+
+async function decryptList(secret) {
+  const res = await fetch('private/biznos.enc', { cache: 'no-cache' });
+  if (!res.ok) throw new Error('사업자번호 목록 파일을 불러오지 못했습니다.');
+  const file = new Uint8Array(await res.arrayBuffer());
+  const text = new TextEncoder();
+  // openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 형식: "Salted__" + salt(8) + 암호문
+  const base = await crypto.subtle.importKey('raw', text.encode(secret), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: file.slice(8, 16), iterations: 600000 }, base, 384));
+  try {
+    const key = await crypto.subtle.importKey('raw', bits.slice(0, 32), 'AES-CBC', false, ['decrypt']);
+    const packed = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: bits.slice(32, 48) }, key, file.slice(16));
+    const stream = new Blob([packed]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return JSON.parse(await new Response(stream).text());
+  } catch {
+    throw new Error('열쇠가 맞지 않습니다.');
+  }
+}
+
+async function unlock(secret) {
+  const entries = await decryptList(secret);
+  // 공개 데이터(data/nts.json)의 id 는 HMAC-SHA256(열쇠, 사업자번호) 앞 16자리다 (scripts/bizlist.py 의 public_id)
+  const text = new TextEncoder();
+  const hmac = await crypto.subtle.importKey('raw', text.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const ids = await Promise.all(entries.map(async (e) => {
+    const sig = new Uint8Array(await crypto.subtle.sign('HMAC', hmac, text.encode(e.b_no)));
+    return [...sig.slice(0, 8)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }));
+  lock.entries = entries.map((e) => ({ ...e, key: nameKey(e.name) }));
+  lock.byId = new Map(ids.map((id, i) => [id, entries[i].b_no]));
+  lock.byName = new Map();
+  for (const e of lock.entries) if (e.key) lock.byName.set(e.key, [...(lock.byName.get(e.key) || []), e.b_no]);
+  lock.on = true;
+}
+
+function relock() {
+  Object.assign(lock, { on: false, entries: [], byId: new Map(), byName: new Map() });
+  try { localStorage.removeItem(KEY_STORE); } catch {}
+}
+
+// 잠금 상태가 바뀌면 국세청 목록의 검색 대상과 화면 표시를 다시 맞춘다
+function refreshLock() {
+  for (const r of views.nts.rows) {
+    r._bno = lock.byId.get(r.id) || '';
+    r._text = norm([r.name, r._bno, fmtBizno(r._bno)].join(' '));
+  }
+  $('lockState').textContent = lock.on
+    ? `사용 중 · 사업자번호 ${lock.entries.length.toLocaleString('ko-KR')}건으로 검색할 수 있습니다`
+    : '잠김 · 열쇠를 입력하면 사업자번호로 검색할 수 있습니다';
+  $('lockKey').parentElement.hidden = lock.on;
+  $('lockGo').hidden = lock.on;
+  $('lockClear').hidden = !lock.on;
+  showView(current);
+}
 
 /* ---------- 두 목록(탭)의 정의 ---------- */
 const views = {
@@ -200,15 +276,18 @@ const views = {
         el('td', { className: 'nowrap' }, r.TELNO || '-'),
       ];
     },
-    fields: (r) => Object.entries(r)
-      .filter(([k, v]) => !k.startsWith('_') && v != null && v !== '')
-      .map(([k, v]) => [PERMIT_LABELS[k] || k, /_YMD$/.test(k) ? fmtDate(v) : /_PNT$/.test(k) ? fmtStamp(v) : String(v)]),
+    fields: (r) => [
+      ...Object.entries(r)
+        .filter(([k, v]) => !k.startsWith('_') && v != null && v !== '')
+        .map(([k, v]) => [PERMIT_LABELS[k] || k, /_YMD$/.test(k) ? fmtDate(v) : /_PNT$/.test(k) ? fmtStamp(v) : String(v)]),
+      ...(lock.byName.has(r._key) ? [['사업자번호 (이름이 같은 업체 기준)', lock.byName.get(r._key).map(fmtBizno).join(', ')]] : []),
+    ],
     name: (r) => r.BPLC_NM, other: 'nts', otherLabel: '국세청 사업자 상태에서 같은 이름 찾기',
   },
   nts: {
     tab: '국세청 사업자 상태', url: 'data/nts.json', rows: [],
     qLabel: '검색 (기업명)', placeholder: '예: 엔터테인먼트', sttsLabel: '사업자 상태',
-    head: ['기업명', '사업자 상태', '과세유형', '폐업일자'],
+    get head() { return ['기업명', '사업자 상태', '과세유형', '폐업일자', ...(lock.on ? ['사업자번호'] : [])]; },
     status: (r) => r.status || '',
     text: (r) => r.name,
     sorts: {
@@ -220,8 +299,9 @@ const views = {
       el('td', {}, badge(r.status || '-')),
       el('td', {}, r.tax || '-'),
       el('td', { className: 'nowrap' }, fmtDate(r.end) || '-'),
+      lock.on ? el('td', { className: 'nowrap' }, fmtBizno(r._bno) || '-') : null,
     ],
-    fields: (r) => [['기업명', r.name], ['사업자 상태', r.status], ['과세유형', r.tax], ['폐업일자', fmtDate(r.end)]]
+    fields: (r) => [['기업명', r.name], ['사업자번호', fmtBizno(r._bno)], ['사업자 상태', r.status], ['과세유형', r.tax], ['폐업일자', fmtDate(r.end)]]
       .filter(([, v]) => v),
     name: (r) => r.name, other: 'permit', otherLabel: '인허가 등록 현황에서 같은 이름 찾기',
   },
@@ -262,8 +342,14 @@ function applyFilters() {
   const view = views[current];
   view.q = $('q').value; view.stts = $('stts').value; view.sort = $('sort').value;
   const q = norm(view.q);
+  // 인허가 목록에는 사업자번호가 없으므로, 번호로 검색하면 번호 목록에서 업체명을 찾아 이름이 같은 업체를 보여 준다
+  const digits = view.q.replace(/[\s-]/g, '');
+  const looksLikeNumber = /^\d{5,10}$/.test(digits);
+  const byNumber = current === 'permit' && lock.on && looksLikeNumber
+    ? lock.entries.filter((e) => e.key && e.b_no.includes(digits)) : [];
+  const keys = new Set(byNumber.map((e) => e.key));
   view.filtered = view.rows
-    .filter((r) => (!view.stts || view.status(r) === view.stts) && (!q || r._text.includes(q)))
+    .filter((r) => (!view.stts || view.status(r) === view.stts) && (!q || r._text.includes(q) || keys.has(r._key)))
     .sort(view.sorts[view.sort][1]);
   view.shown = 0;
   $('rows').replaceChildren();
@@ -271,14 +357,24 @@ function applyFilters() {
   $('empty').hidden = view.filtered.length > 0;
   const total = view.rows.length.toLocaleString('ko-KR');
   const hit = view.filtered.length.toLocaleString('ko-KR');
-  $('count').textContent = view.filtered.length === view.rows.length ? `전체 ${total}건` : `전체 ${total}건 중 ${hit}건`;
+  let note = '';
+  if (byNumber.length) {
+    const names = [...new Set(byNumber.map((e) => e.name))];
+    note = ` · 이 사업자번호의 업체: ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` 외 ${names.length - 3}곳` : ''}. `
+      + (view.filtered.length
+        ? '인허가 목록에서 이름이 같은 업체를 표시합니다 (동명의 다른 업체일 수 있음).'
+        : '인허가 목록에는 같은 이름의 업체가 없습니다. 국세청 사업자 상태 탭에서 확인하세요.');
+  } else if (current === 'permit' && looksLikeNumber && views.nts.rows.length) {
+    note = lock.on ? ' · 번호 목록에 없는 사업자번호입니다.' : ' · 사업자번호 검색은 위 "사업자번호 조회"에서 잠금 해제 후 사용할 수 있습니다.';
+  }
+  $('count').textContent = (view.filtered.length === view.rows.length ? `전체 ${total}건` : `전체 ${total}건 중 ${hit}건`) + note;
 }
 
 function showView(key) {
   current = key;
   const view = views[key];
   for (const b of $('tabs').children) b.setAttribute('aria-selected', String(b.dataset.view === key));
-  $('qLabel').textContent = view.qLabel;
+  $('qLabel').textContent = lock.on ? view.qLabel.replace(')', ' · 사업자번호)') : view.qLabel;
   $('q').placeholder = view.placeholder;
   $('sttsLabel').textContent = view.sttsLabel;
   $('head').replaceChildren(...view.head.map((h) => el('th', {}, h)));
@@ -363,6 +459,7 @@ async function init() {
   views.permit.rows = permit.items;
   views.nts.rows = nts ? nts.items : [];
   for (const view of Object.values(views)) for (const r of view.rows) r._text = norm(view.text(r));
+  for (const r of views.permit.rows) r._key = nameKey(r.BPLC_NM);
   $('meta').textContent = `행정안전부 인허가 데이터${nts ? ' · 국세청 사업자등록 상태' : ''} 기준 · 마지막 확인 ${permit.checkedAt} · 매일 자동 갱신`
     + (permit.excludedFrom ? ` · 인허가일 ${permit.excludedFrom} 이후 등록 업체는 제외` : '');
 
@@ -395,6 +492,36 @@ async function init() {
 
   $('listArea').hidden = false;
   showView('permit');
+  if (nts) setupLock();
+}
+
+function setupLock() {
+  const tryUnlock = async (secret, remember) => {
+    $('lockGo').disabled = true;
+    $('lockState').textContent = '확인 중…';
+    try {
+      await unlock(secret);
+      if (remember) { try { localStorage.setItem(KEY_STORE, secret); } catch {} }
+      $('lockKey').value = '';
+      $('lockBox').open = false;
+    } catch (e) {
+      relock();
+      $('lockMsg').textContent = e.message;
+    }
+    $('lockGo').disabled = false;
+    refreshLock();
+  };
+  $('lockForm').onsubmit = (e) => {
+    e.preventDefault();
+    const secret = $('lockKey').value.trim();
+    if (secret) tryUnlock(secret, true);
+  };
+  $('lockClear').onclick = () => { relock(); refreshLock(); };
+  $('lockBox').hidden = false;
+  refreshLock();
+  let saved = '';
+  try { saved = localStorage.getItem(KEY_STORE) || ''; } catch {}
+  if (saved) tryUnlock(saved, false);
 }
 
 init();
