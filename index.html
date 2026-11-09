@@ -363,7 +363,8 @@ async function init() {
   views.permit.rows = permit.items;
   views.nts.rows = nts ? nts.items : [];
   for (const view of Object.values(views)) for (const r of view.rows) r._text = norm(view.text(r));
-  $('meta').textContent = `행정안전부 인허가 데이터${nts ? ' · 국세청 사업자등록 상태' : ''} 기준 · 마지막 확인 ${permit.checkedAt} · 매일 자동 갱신`;
+  $('meta').textContent = `행정안전부 인허가 데이터${nts ? ' · 국세청 사업자등록 상태' : ''} 기준 · 마지막 확인 ${permit.checkedAt} · 매일 자동 갱신`
+    + (permit.excludedFrom ? ` · 인허가일 ${permit.excludedFrom} 이후 등록 업체는 제외` : '');
 
   events.all = changes || [];
   $('changesCard').hidden = false;

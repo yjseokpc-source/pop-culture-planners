@@ -30,6 +30,7 @@ import html
 import json
 import math
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -76,6 +77,10 @@ WATCH_FIELDS = {
     "TELNO": "전화번호",
 }
 STATUS_FIELDS = {"SALS_STTS_NM", "DTL_SALS_STTS_NM"}
+
+# 인허가일자가 이 날짜(당일 포함) 이후인 업체는 관리 대상이 아니므로 목록·알림에서 뺀다.
+# YYYYMMDD. 빈 문자열이면 제외하지 않는다.
+EXCLUDE_LICENSED_FROM = "20260701"
 
 # 국세청 조회 결과 중 변동을 감시할 항목
 NTS_WATCH_FIELDS = {"status": "사업자 상태", "tax": "과세유형"}
@@ -173,7 +178,16 @@ def fetch_all(key):
         result[row_id(row)] = row
     if len(result) < len(rows):
         print(f"::warning::관리번호가 겹치는 행 {len(rows) - len(result)}건은 하나로 합쳐졌습니다.")
-    return result
+    kept = {k: row for k, row in result.items() if managed(row)}
+    if len(kept) < len(result):
+        print(f"관리 대상 {len(kept):,}건 (인허가일 {fmt_date(EXCLUDE_LICENSED_FROM)} 이후 {len(result) - len(kept):,}건 제외)")
+    return kept
+
+
+def managed(row):
+    """관리 대상인지. 인허가일자가 기준일 이후(당일 포함)면 제외한다."""
+    licensed = re.sub(r"\D", "", row.get("LCPMT_YMD", ""))[:8]
+    return not (EXCLUDE_LICENSED_FROM and len(licensed) == 8 and licensed >= EXCLUDE_LICENSED_FROM)
 
 
 # ---------------------------------------------------------------- 비교
@@ -322,25 +336,24 @@ def load_snapshot():
     if not SNAPSHOT.exists():
         return None
     data = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
-    return {row_id(row): row for row in data["items"]}
+    # 제외 기준을 바꾼 직후에도 빠진 업체가 '목록에서 삭제'로 알림되지 않게 직전 목록에도 같은 기준을 적용한다.
+    return {row_id(row): row for row in data["items"] if managed(row)}
 
 
 def dump_lines(rows):
     return ",\n".join(json.dumps(r, ensure_ascii=False, separators=(",", ":")) for r in rows)
 
 
-def write_snapshot(path, rows, now):
+def write_snapshot(path, rows, now, **extra):
     """한 줄에 한 건씩, 식별자 순으로 저장해 git 변경분이 실제 변동만큼만 생기게 한다."""
     ordered = [rows[k] for k in sorted(rows)]
-    path.write_text(
-        '{"checkedAt":%s,"total":%d,"items":[\n%s\n]}\n' % (json.dumps(now), len(ordered), dump_lines(ordered)),
-        encoding="utf-8",
-    )
+    head = json.dumps({"checkedAt": now, "total": len(ordered), **extra}, ensure_ascii=False, separators=(",", ":"))
+    path.write_text('%s,"items":[\n%s\n]}\n' % (head[:-1], dump_lines(ordered)), encoding="utf-8")
 
 
 def save(rows, nts, events, now):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    write_snapshot(SNAPSHOT, rows, now)
+    write_snapshot(SNAPSHOT, rows, now, excludedFrom=fmt_date(EXCLUDE_LICENSED_FROM))
     if nts:
         write_snapshot(NTS_SNAPSHOT, nts["rows"], now)
     history = json.loads(CHANGELOG.read_text(encoding="utf-8")) if CHANGELOG.exists() else []
@@ -434,7 +447,7 @@ def build_mail(date, planners, planner_events, first_run, nts):
     elif changed:
         counts = ", ".join(f"{title} {len(rows)}건" for title, rows, _, _ in sections)
         subject = f"[기획업 모니터링] {date} 변동 {changed}건 ({counts})"
-        mail.paragraph(f"대중문화예술기획업 등록 정보에 변동이 있습니다. (인허가 전체 {len(planners):,}건)")
+        mail.paragraph(f"대중문화예술기획업 등록 정보에 변동이 있습니다. (인허가 관리 대상 {len(planners):,}건)")
     elif nts_started:
         subject = f"[기획업 모니터링] 국세청 사업자 상태 모니터링을 시작했습니다 ({len(nts['rows']):,}건)"
     else:
