@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>대중문화예술기획업 등록 현황</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #16181d; --muted: #667085;
+    --border: #e1e4ea; --accent: #2f5bea;
+    --ok-bg: #e3f6ea; --ok: #12703a; --bad-bg: #fde8e8; --bad: #b42318;
+    --warn-bg: #fff3d6; --warn: #8a5a00; --neutral-bg: #eceef2; --neutral: #475467;
+    --info-bg: #e6edff; --info: #2446b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318; --surface: #1a1d24; --text: #eceef2; --muted: #98a2b3;
+      --border: #2c313b; --accent: #7b9bff;
+      --ok-bg: #12301f; --ok: #6fdc9a; --bad-bg: #3a1614; --bad: #ff9a8f;
+      --warn-bg: #382a08; --warn: #f5c451; --neutral-bg: #262a33; --neutral: #b4bcc9;
+      --info-bg: #1a2547; --info: #a9bdff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+  }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input, select, button {
+    font: inherit; color: inherit; border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 12px; background: var(--bg); min-width: 0;
+  }
+  input:focus, select:focus, button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { cursor: pointer; background: var(--surface); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .row > .grow { flex: 1 1 240px; }
+  .row > .grow input { width: 100%; }
+  .notice { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; white-space: pre-wrap; }
+  .count { margin: 0 0 12px; color: var(--muted); font-size: 14px; min-height: 21px; }
+
+  details.changes summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  details.changes summary h2 { display: inline; }
+  ul.events { list-style: none; margin: 12px 0 0; padding: 0; }
+  ul.events li { display: grid; grid-template-columns: 92px 76px 1fr; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; align-items: baseline; }
+  ul.events .when { color: var(--muted); font-variant-numeric: tabular-nums; }
+  ul.events .what { min-width: 0; }
+  ul.events .name { font-weight: 600; cursor: pointer; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; background: none; border: 0; padding: 0; text-align: left; }
+  .more { margin-top: 12px; }
+  @media (max-width: 560px) { ul.events li { grid-template-columns: auto 1fr; } ul.events .what { grid-column: 1 / -1; } }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.nowrap { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tbody tr.item { cursor: pointer; }
+  tbody tr.item:hover { background: var(--bg); }
+  tr.detail td { background: var(--bg); }
+  td.name { font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .badge.neutral { background: var(--neutral-bg); color: var(--neutral); }
+  .badge.info { background: var(--info-bg); color: var(--info); }
+  .small { color: var(--muted); font-size: 12px; }
+  dl.fields { display: grid; grid-template-columns: minmax(120px, max-content) 1fr; gap: 4px 16px; margin: 0; font-size: 13px; }
+  dl.fields dt { color: var(--muted); }
+  dl.fields dd { margin: 0; word-break: break-all; }
+  .empty { text-align: center; color: var(--muted); padding: 32px 0; }
+  #sentinel { height: 1px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>대중문화예술기획업 등록 현황</h1>
+  <p class="sub" id="meta">행정안전부 인허가 데이터(공공데이터포털) 기준</p>
+
+  <div class="notice" id="notice" hidden></div>
+
+  <details class="card changes" id="changesCard" open hidden>
+    <summary><h2>최근 변동사항</h2><span class="small" id="changesMeta"></span></summary>
+    <ul class="events" id="events"></ul>
+    <button class="more" id="moreEvents" type="button" hidden>이전 변동 더 보기</button>
+  </details>
+
+  <div id="listArea" hidden>
+    <form class="card" id="form" role="search">
+      <div class="row">
+        <div class="grow">
+          <label for="q">검색 (사업장명 · 주소 · 전화번호)</label>
+          <input id="q" type="search" placeholder="예: 엔터테인먼트, 강남구">
+        </div>
+        <div>
+          <label for="stts">영업상태</label>
+          <select id="stts"><option value="">전체</option></select>
+        </div>
+        <div>
+          <label for="sort">정렬</label>
+          <select id="sort">
+            <option value="licensed">인허가일 최신순</option>
+            <option value="updated">최근 수정순</option>
+            <option value="name">사업장명순</option>
+          </select>
+        </div>
+      </div>
+    </form>
+
+    <p class="count" id="count"></p>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>사업장명</th><th>영업상태</th><th>인허가일자</th><th>폐업일자</th><th>소재지</th><th>전화</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="empty" hidden>조건에 맞는 기획업 등록 정보가 없습니다.</div>
+      <div id="sentinel"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+// 데이터는 scripts/sync.py 가 매일 갱신하는 정적 파일에서 읽는다 (브라우저에서 API를 직접 호출하지 않음).
+const DATA_URL = 'data/planners.json';
+const CHANGES_URL = 'data/changes.json';
+const BATCH = 200;        // 스크롤할 때마다 추가로 그리는 행 수
+const EVENTS_STEP = 20;
+
+const LABELS = {
+  BPLC_NM: '사업장명', SALS_STTS_CD: '영업상태코드', SALS_STTS_NM: '영업상태',
+  DTL_SALS_STTS_CD: '상세영업상태코드', DTL_SALS_STTS_NM: '상세영업상태',
+  LCPMT_YMD: '인허가일자', LCPMT_RTRCN_YMD: '인허가취소일자', CLSBIZ_YMD: '폐업일자',
+  TCBIZ_BGNG_YMD: '휴업시작일자', TCBIZ_END_YMD: '휴업종료일자',
+  ROAD_NM_ADDR: '도로명주소', LOTNO_ADDR: '지번주소', TELNO: '전화번호',
+  CULTR_BZMN_SE_NM: '문화사업자구분', MNG_NO: '관리번호', OPN_ATMY_GRP_CD: '개방자치단체코드',
+  DAT_UPDT_PNT: '데이터갱신시점', LAST_MDFCN_PNT: '최종수정시점',
+};
+
+const $ = (id) => document.getElementById(id);
+const state = { all: [], filtered: [], shown: 0, events: [], eventsShown: 0 };
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children.filter((c) => c != null && c !== ''));
+  return node;
+}
+
+function fmtDate(v) {
+  const s = String(v ?? '');
+  return /^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : s;
+}
+function fmtStamp(v) {
+  const s = String(v ?? '');
+  return /^\d{14}$/.test(s) ? `${fmtDate(s.slice(0, 8))} ${s.slice(8, 10)}:${s.slice(10, 12)}` : s;
+}
+function fmtField(key, value) {
+  if (/_YMD$/.test(key)) return fmtDate(value);
+  if (/_PNT$/.test(key)) return fmtStamp(value);
+  return String(value);
+}
+
+function badgeClass(name) {
+  if (/폐업|취소|말소|만료/.test(name)) return 'bad';
+  if (/휴업|정지|중지/.test(name)) return 'warn';
+  if (/영업|정상/.test(name)) return 'ok';
+  return 'neutral';
+}
+const norm = (s) => String(s ?? '').toLowerCase().replace(/\s+/g, '');
+
+/* ---------- 목록 ---------- */
+function rowNode(row) {
+  const stts = row.SALS_STTS_NM || '';
+  const dtl = row.DTL_SALS_STTS_NM || '';
+  const label = stts || dtl || '-';
+  const tr = el('tr', { className: 'item', title: '클릭하면 전체 항목을 볼 수 있습니다' },
+    el('td', { className: 'name' }, row.BPLC_NM || '-'),
+    el('td', {},
+      el('span', { className: `badge ${badgeClass(label)}` }, label),
+      dtl && dtl !== stts ? el('div', { className: 'small' }, dtl) : null),
+    el('td', { className: 'nowrap' }, fmtDate(row.LCPMT_YMD) || '-'),
+    el('td', { className: 'nowrap' }, fmtDate(row.CLSBIZ_YMD) || '-'),
+    el('td', {}, row.ROAD_NM_ADDR || row.LOTNO_ADDR || '-'),
+    el('td', { className: 'nowrap' }, row.TELNO || '-'),
+  );
+  let detail = null;
+  tr.onclick = () => {
+    if (detail) { detail.remove(); detail = null; return; }
+    const dl = el('dl', { className: 'fields' });
+    for (const [k, v] of Object.entries(row)) {
+      if (k.startsWith('_') || v == null || v === '') continue;
+      dl.append(el('dt', {}, LABELS[k] || k), el('dd', {}, fmtField(k, v)));
+    }
+    detail = el('tr', { className: 'detail' }, el('td', { colSpan: 6 }, dl));
+    tr.after(detail);
+  };
+  return tr;
+}
+
+function renderMore() {
+  const next = state.filtered.slice(state.shown, state.shown + BATCH);
+  if (!next.length) return;
+  $('rows').append(...next.map(rowNode));
+  state.shown += next.length;
+}
+
+const SORTS = {
+  licensed: (a, b) => (b.LCPMT_YMD || '').localeCompare(a.LCPMT_YMD || ''),
+  updated: (a, b) => (b.LAST_MDFCN_PNT || b.DAT_UPDT_PNT || '').localeCompare(a.LAST_MDFCN_PNT || a.DAT_UPDT_PNT || ''),
+  name: (a, b) => (a.BPLC_NM || '').localeCompare(b.BPLC_NM || '', 'ko'),
+};
+
+function applyFilters() {
+  const q = norm($('q').value);
+  const stts = $('stts').value;
+  state.filtered = state.all
+    .filter((r) => (!stts || (r.SALS_STTS_NM || '') === stts) && (!q || r._text.includes(q)))
+    .sort(SORTS[$('sort').value]);
+  state.shown = 0;
+  $('rows').replaceChildren();
+  renderMore();
+  $('empty').hidden = state.filtered.length > 0;
+  const total = state.all.length.toLocaleString('ko-KR');
+  const hit = state.filtered.length.toLocaleString('ko-KR');
+  $('count').textContent = state.filtered.length === state.all.length ? `전체 ${total}건` : `전체 ${total}건 중 ${hit}건`;
+}
+
+function setupFilters() {
+  const counts = new Map();
+  for (const r of state.all) counts.set(r.SALS_STTS_NM || '', (counts.get(r.SALS_STTS_NM || '') || 0) + 1);
+  for (const [name, n] of [...counts].sort((a, b) => b[1] - a[1])) {
+    if (name) $('stts').append(el('option', { value: name }, `${name} (${n.toLocaleString('ko-KR')})`));
+  }
+  let timer;
+  $('q').oninput = () => { clearTimeout(timer); timer = setTimeout(applyFilters, 150); };
+  $('stts').onchange = applyFilters;
+  $('sort').onchange = applyFilters;
+  $('form').onsubmit = (e) => { e.preventDefault(); applyFilters(); };
+  new IntersectionObserver((entries) => { if (entries[0].isIntersecting) renderMore(); }, { rootMargin: '600px' })
+    .observe($('sentinel'));
+}
+
+/* ---------- 변동사항 ---------- */
+const EVENT_TYPES = {
+  new: ['신규 등록', 'info'],
+  removed: ['목록 삭제', 'neutral'],
+};
+
+function eventNode(e) {
+  let badge, body;
+  if (e.type === 'changed') {
+    const statusChange = e.changes.find((c) => c.field === 'SALS_STTS_NM') || e.changes.find((c) => /STTS/.test(c.field));
+    badge = statusChange ? ['상태 변경', badgeClass(statusChange.after)] : ['정보 변경', 'neutral'];
+    body = e.changes.map((c) => `${c.label}: ${c.before || '(없음)'} → ${c.after || '(없음)'}`).join(' · ');
+  } else {
+    badge = EVENT_TYPES[e.type] || [e.type, 'neutral'];
+    body = e.type === 'new'
+      ? [e.status, e.licensed && `인허가일 ${fmtDate(e.licensed)}`].filter(Boolean).join(' · ')
+      : `직전 상태: ${e.status || '-'}`;
+  }
+  const name = el('button', { className: 'name', type: 'button', title: '이 사업장을 목록에서 찾기' }, e.name || '(이름 없음)');
+  name.onclick = () => {
+    $('q').value = e.name || '';
+    $('stts').value = '';
+    applyFilters();
+    $('form').scrollIntoView({ behavior: 'smooth' });
+  };
+  return el('li', {},
+    el('span', { className: 'when' }, e.date),
+    el('span', {}, el('span', { className: `badge ${badge[1]}` }, badge[0])),
+    el('span', { className: 'what' }, name, el('div', {}, body), e.addr ? el('div', { className: 'small' }, e.addr) : null),
+  );
+}
+
+function renderEvents() {
+  const next = state.events.slice(state.eventsShown, state.eventsShown + EVENTS_STEP);
+  $('events').append(...next.map(eventNode));
+  state.eventsShown += next.length;
+  $('moreEvents').hidden = state.eventsShown >= state.events.length;
+}
+
+/* ---------- 시작 ---------- */
+async function loadJson(url) {
+  const res = await fetch(url, { cache: 'no-cache' });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function init() {
+  let data, events;
+  try {
+    [data, events] = await Promise.all([loadJson(DATA_URL), loadJson(CHANGES_URL)]);
+  } catch (e) {
+    $('notice').textContent = location.protocol === 'file:'
+      ? '이 페이지는 파일을 직접 열어서는 데이터를 읽을 수 없습니다. 배포된 주소(GitHub Pages 등)로 접속해 주세요.'
+      : `데이터를 불러오지 못했습니다. (${e.message})`;
+    $('notice').hidden = false;
+    return;
+  }
+  if (!data) {
+    $('notice').textContent = '아직 수집된 데이터가 없습니다. GitHub 저장소의 Actions 탭에서 "기획업 데이터 동기화"를 한 번 실행해 주세요.';
+    $('notice').hidden = false;
+    return;
+  }
+
+  state.all = data.items;
+  for (const r of state.all) r._text = norm([r.BPLC_NM, r.ROAD_NM_ADDR, r.LOTNO_ADDR, r.TELNO].join(' '));
+  $('meta').textContent = `행정안전부 인허가 데이터(공공데이터포털) 기준 · 마지막 확인 ${data.checkedAt} · 매일 자동 갱신`;
+
+  state.events = events || [];
+  $('changesCard').hidden = false;
+  $('changesMeta').textContent = state.events.length
+    ? `최근 ${state.events.length.toLocaleString('ko-KR')}건 · 변동 시 메일로도 알림`
+    : '아직 감지된 변동이 없습니다';
+  $('moreEvents').onclick = renderEvents;
+  renderEvents();
+
+  $('listArea').hidden = false;
+  setupFilters();
+  applyFilters();
+}
+
+init();
+</script>
+</body>
+</html>

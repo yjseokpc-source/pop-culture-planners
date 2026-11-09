@@ -1,0 +1,53 @@
+name: 기획업 데이터 동기화
+
+# 매일 전체 목록을 내려받아 전일 대비 변동을 찾고, 변동이 있으면 메일을 보낸 뒤 data/ 를 커밋한다.
+#
+# 저장소 Settings › Secrets and variables › Actions 에 등록할 값
+#   Secrets   DATA_GO_KR_KEY  공공데이터포털 인증키
+#             SMTP_USER       보내는 메일 계정 (예: Gmail 주소)
+#             SMTP_PASS       메일 비밀번호 (Gmail은 '앱 비밀번호' 16자리)
+#             MAIL_TO         받는 사람 (여러 명이면 쉼표로 구분)
+#   Variables SITE_URL        (선택) 메일에 넣을 조회 페이지 주소
+#             SMTP_HOST / SMTP_PORT  (선택) Gmail이 아닐 때만. 기본 smtp.gmail.com / 465
+
+on:
+  schedule:
+    - cron: '0 23 * * *'   # 매일 08:00 (한국 시간)
+  workflow_dispatch:        # Actions 탭에서 수동 실행
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 동기화 및 변동 알림
+        env:
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: python3 scripts/sync.py
+
+      - name: 데이터 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "data: $(TZ=Asia/Seoul date +%F) 동기화"
+            git push
+          fi
