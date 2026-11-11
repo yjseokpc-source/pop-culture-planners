@@ -1,3 +1,4 @@
 [
+{"date":"2026-11-11","id":"9fef274c624df8c4","name":"탑톡엔터테인먼트","source":"nts","type":"changed","changes":[{"field":"status","label":"사업자 상태","before":"계속사업자","after":"폐업자"}]},
 {"date":"2026-11-09","id":"6470000:M04022025000001","name":"뮤(Mew) 엔터테인먼트","addr":"경상북도 안동시 제비원로 ***-*, ***동 ***호 (금곡동,경안타운)","type":"changed","changes":[{"field":"SALS_STTS_NM","label":"영업상태","before":"영업/정상","after":"휴업"},{"field":"DTL_SALS_STTS_NM","label":"상세영업상태","before":"영업","after":"휴업"},{"field":"LOTNO_ADDR","label":"지번주소","before":"경상북도 안동시 금곡동 ***번지 *호 경안타운 ***동 ***호","after":"경상북도 안동시 금곡동 ***번지 *호 경안타운 ***동"}]}
 ]
