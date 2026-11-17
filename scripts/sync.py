@@ -104,6 +104,17 @@ def normalize_key(key):
     return urllib.parse.unquote(key) if "%" in key else key
 
 
+# 게이트웨이 오류 중 재시도해도 소용없는 것 (인증키·파라미터·호출 한도 문제). 메시지에 이 단어가 있으면 바로 중단한다.
+# 그 외(HTTP_ERROR, SERVICETIME_OUT, APPLICATION_ERROR, DB_ERROR, UNKNOWN_ERROR 등)는 제공기관 서버가
+# 잠시 응답하지 못한 것이므로 재시도한다.
+PERMANENT_GATEWAY_ERRORS = (
+    "SERVICE_KEY", "SERVICEKEY", "DEADLINE", "LIMITED_NUMBER", "ACCESS_DENIED",
+    "REQUEST_PARAMETER", "NO_OPENAPI_SERVICE", "UNREGISTERED_IP", "UNSIGNED_CALL",
+)
+# 페이지 하나를 포기하기 전까지 기다리는 간격(초). 합계 약 4분. 전체 목록은 보통 2~3분이면 끝난다.
+RETRY_WAITS = (5, 10, 20, 40, 60, 90)
+
+
 def gateway_error(text):
     """게이트웨이 오류 응답(JSON 또는 XML)에서 메시지를 뽑는다. 오류가 아니면 None."""
     try:
@@ -118,6 +129,11 @@ def gateway_error(text):
     return None
 
 
+def permanent_error(message):
+    """재시도해도 결과가 같은 게이트웨이 오류인지."""
+    return any(word in message.upper() for word in PERMANENT_GATEWAY_ERRORS)
+
+
 def fetch_page(key, page):
     query = urllib.parse.urlencode({
         "serviceKey": key, "pageNo": page, "numOfRows": PAGE_SIZE, "returnType": "json",
@@ -125,16 +141,17 @@ def fetch_page(key, page):
     request = urllib.request.Request(f"{API_URL}?{query}", headers={"User-Agent": "planner-sync/1.0"})
 
     last_error = None
-    for attempt in range(4):
+    for attempt in range(len(RETRY_WAITS) + 1):
         if attempt:
-            time.sleep(3 * attempt)
+            print(f"  {page}페이지 재시도 {attempt}/{len(RETRY_WAITS)} ({last_error}) - {RETRY_WAITS[attempt - 1]}초 대기")
+            time.sleep(RETRY_WAITS[attempt - 1])
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 text = response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             text = e.read().decode("utf-8", "replace")
             message = gateway_error(text) or f"HTTP {e.code}"
-            if e.code in (400, 401, 403):  # 키/권한 문제는 재시도해도 소용없다
+            if e.code in (400, 401, 403) or permanent_error(message):  # 키/권한 문제는 재시도해도 소용없다
                 raise SyncError(f"API 호출 거부: {message}")
             last_error = message
             continue
@@ -144,7 +161,11 @@ def fetch_page(key, page):
 
         message = gateway_error(text)
         if message:
-            raise SyncError(f"API 오류: {message}")
+            if permanent_error(message):
+                raise SyncError(f"API 호출 거부: {message}")
+            # HTTP_ERROR, SERVICETIME_OUT 등: 제공기관 서버가 잠시 응답하지 못한 것이므로 재시도한다
+            last_error = message
+            continue
         try:
             body = json.loads(text)["response"]["body"]
             items = body.get("items") or {}
