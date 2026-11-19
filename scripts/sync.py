@@ -24,6 +24,8 @@
 옵션
   --no-mail   메일을 보내지 않고 데이터만 갱신
   --dry-run   아무것도 저장/발송하지 않고 결과와 메일 본문만 출력
+  --daily     오늘(한국 시간) 동기화가 이미 끝났으면 아무것도 하지 않고 종료.
+              하루에 여러 번 예약 실행해 두고 성공할 때까지만 반복하게 할 때 쓴다.
 """
 import argparse
 import html
@@ -96,6 +98,10 @@ class SyncError(Exception):
     pass
 
 
+class ApiRejected(SyncError):
+    """인증키·권한·호출 한도 문제. 다시 시도해도 결과가 같다."""
+
+
 # ---------------------------------------------------------------- API
 
 def normalize_key(key):
@@ -113,6 +119,9 @@ PERMANENT_GATEWAY_ERRORS = (
 )
 # 페이지 하나를 포기하기 전까지 기다리는 간격(초). 합계 약 4분. 전체 목록은 보통 2~3분이면 끝난다.
 RETRY_WAITS = (5, 10, 20, 40, 60, 90)
+# 어느 페이지든 끝내 못 받으면 목록 수집을 처음부터 다시 한다. 그 전에 기다리는 간격(초).
+# 제공기관 서버가 수 분 동안 응답하지 않는 날을 넘기기 위한 것. 최악의 경우 수집에만 1시간 반쯤 걸린다.
+COLLECT_RETRY_WAITS = (300, 600)
 
 
 def gateway_error(text):
@@ -152,7 +161,7 @@ def fetch_page(key, page):
             text = e.read().decode("utf-8", "replace")
             message = gateway_error(text) or f"HTTP {e.code}"
             if e.code in (400, 401, 403) or permanent_error(message):  # 키/권한 문제는 재시도해도 소용없다
-                raise SyncError(f"API 호출 거부: {message}")
+                raise ApiRejected(f"API 호출 거부: {message}")
             last_error = message
             continue
         except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -162,7 +171,7 @@ def fetch_page(key, page):
         message = gateway_error(text)
         if message:
             if permanent_error(message):
-                raise SyncError(f"API 호출 거부: {message}")
+                raise ApiRejected(f"API 호출 거부: {message}")
             # HTTP_ERROR, SERVICETIME_OUT 등: 제공기관 서버가 잠시 응답하지 못한 것이므로 재시도한다
             last_error = message
             continue
@@ -209,6 +218,27 @@ def fetch_all(key):
     if len(kept) < len(result):
         print(f"관리 대상 {len(kept):,}건 (인허가일 {fmt_date(EXCLUDE_LICENSED_FROM)} 이후 {len(result) - len(kept):,}건 제외)")
     return kept
+
+
+def collect(key, old):
+    """전체 목록을 받는다. 일시 장애로 실패하면 잠시 기다렸다가 처음부터 다시 받는다."""
+    error = None
+    for attempt in range(len(COLLECT_RETRY_WAITS) + 1):
+        if attempt:
+            wait = COLLECT_RETRY_WAITS[attempt - 1]
+            print(f"::warning::{error} {wait // 60}분 뒤 목록 수집을 처음부터 다시 시도합니다 "
+                  f"({attempt}/{len(COLLECT_RETRY_WAITS)}).")
+            time.sleep(wait)
+        try:
+            new = fetch_all(key)
+            if old and len(new) < len(old) * 0.8:
+                raise SyncError(f"목록이 비정상적으로 줄었습니다 ({len(old):,} → {len(new):,}건). 이번 실행은 반영하지 않습니다.")
+            return new
+        except ApiRejected:
+            raise
+        except SyncError as e:
+            error = e
+    raise SyncError(f"목록 수집을 {len(COLLECT_RETRY_WAITS) + 1}번 시도했지만 모두 실패했습니다. 마지막 오류: {error}")
 
 
 def managed(row):
@@ -384,6 +414,23 @@ def count_by(rows, field):
 
 # ---------------------------------------------------------------- 저장
 
+def checked_on(path):
+    """스냅샷의 확인 일자(YYYY-MM-DD). 파일이 없거나 읽을 수 없으면 빈 문자열."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            found = re.search(r'"checkedAt":"(\d{4}-\d{2}-\d{2})', f.readline())
+        return found.group(1) if found else ""
+    except OSError:
+        return ""
+
+
+def synced_today(date):
+    """오늘 동기화가 끝까지 됐는지. 국세청 조회까지 하는 구성이면 그 결과도 오늘 것이어야 한다."""
+    if checked_on(SNAPSHOT) != date:
+        return False
+    return not bizlist.ENC_FILE.exists() or checked_on(NTS_SNAPSHOT) == date
+
+
 def load_snapshot():
     if not SNAPSHOT.exists():
         return None
@@ -552,6 +599,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--no-mail", action="store_true", help="메일을 보내지 않고 데이터만 갱신")
     parser.add_argument("--dry-run", action="store_true", help="저장/발송 없이 결과만 출력")
+    parser.add_argument("--daily", action="store_true", help="오늘 동기화가 이미 끝났으면 건너뛴다")
     args = parser.parse_args()
     mail_enabled = not (args.no_mail or args.dry_run)
 
@@ -565,12 +613,13 @@ def main():
 
     now = datetime.now(KST)
     date, stamp = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d %H:%M")
+    if args.daily and synced_today(date):
+        print(f"오늘({date}) 동기화는 이미 끝났습니다. 건너뜁니다.")
+        return
 
     # 1) 인허가 목록
     old = load_snapshot()
-    new = fetch_all(key)
-    if old and len(new) < len(old) * 0.8:
-        raise SyncError(f"목록이 비정상적으로 줄었습니다 ({len(old):,} → {len(new):,}건). 이번 실행은 반영하지 않습니다.")
+    new = collect(key, old)
     first_run = old is None
     events = [] if first_run else diff(old, new, date)
     if first_run:

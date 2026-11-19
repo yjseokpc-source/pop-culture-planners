@@ -2,6 +2,11 @@ name: 기획업 데이터 동기화
 
 # 매일 전체 목록을 내려받아 전일 대비 변동을 찾고, 변동이 있으면 메일을 보낸 뒤 data/ 를 커밋한다.
 #
+# 하루에 한 번은 반드시 동기화되도록 예약을 여러 번 걸어 둔다. 스크립트는 --daily 옵션으로 실행되어
+# 그날 동기화가 이미 끝났으면 바로 종료하므로, 첫 실행이 성공하면 나머지는 몇 초 만에 끝난다.
+# 인허가 API(제공기관 서버)가 몇 시간씩 응답하지 못하는 날에만 다음 예약 시각에 다시 시도하게 된다.
+# 수동 실행(workflow_dispatch)은 이 확인을 건너뛰고 항상 전체를 다시 받는다.
+#
 # 저장소 Settings › Secrets and variables › Actions 에 등록할 값
 #   Secrets   DATA_GO_KR_KEY  공공데이터포털 인증키
 #             SMTP_USER       보내는 메일 계정 (예: Gmail 주소)
@@ -13,9 +18,14 @@ name: 기획업 데이터 동기화
 #             SMTP_HOST / SMTP_PORT  (선택) Gmail이 아닐 때만. 기본 smtp.gmail.com / 465
 
 on:
-  schedule:
-    - cron: '0 23 * * *'   # 매일 08:00 (한국 시간)
-  workflow_dispatch:        # Actions 탭에서 수동 실행
+  schedule:                 # 한국 시간 08:00 부터 3시간마다. 그날 동기화가 끝나면 나머지는 바로 종료된다
+    - cron: '0 23 * * *'    # 08:00
+    - cron: '0 2 * * *'     # 11:00
+    - cron: '0 5 * * *'     # 14:00
+    - cron: '0 8 * * *'     # 17:00
+    - cron: '0 11 * * *'    # 20:00
+    - cron: '0 14 * * *'    # 23:00
+  workflow_dispatch:        # Actions 탭에서 수동 실행 (그날 동기화 여부와 상관없이 전체를 다시 받는다)
 
 permissions:
   contents: write
@@ -27,7 +37,8 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 40   # 보통 3~10분. 인허가 API가 흔들리는 날은 페이지마다 최대 4분씩 재시도하므로 더 걸릴 수 있다
+    timeout-minutes: 150  # 보통 3~10분. 인허가 API가 흔들리는 날은 페이지마다 최대 4분씩 재시도하고,
+                          # 그래도 안 되면 5분·10분을 기다렸다가 수집을 처음부터 다시 하므로 최대 2시간쯤 걸릴 수 있다
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +54,8 @@ jobs:
           SMTP_PORT: ${{ vars.SMTP_PORT }}
           SITE_URL: ${{ vars.SITE_URL }}
           PYTHONUNBUFFERED: "1"   # 진행 상황이 로그에 바로 찍히도록
-        run: python3 scripts/sync.py
+        # 예약 실행만 --daily: 그날 동기화가 이미 끝났으면 건너뛴다
+        run: python3 scripts/sync.py ${{ github.event_name == 'schedule' && '--daily' || '' }}
 
       # 국세청 조회만 실패한 경우에도 인허가 쪽 결과는 저장되어 있으므로 커밋한다.
       - name: 데이터 커밋
