@@ -1,4 +1,4 @@
-{"checkedAt":"2026-11-23 12:36","total":6038,"excludedClosed":62,"items":[
+{"checkedAt":"2026-11-24 00:30","total":6038,"excludedClosed":62,"items":[
 {"id":"00162e2b52436a87","name":"(주)모델리아","status":"폐업자","tax":"부가가치세 일반과세자","end":"20241115"},
 {"id":"0022e757b20bf10c","name":"에이엠모델매니지먼트(주)","status":"계속사업자","tax":"부가가치세 일반과세자"},
 {"id":"00246b1a4e8db740","name":"(주)피팝코리아","status":"계속사업자","tax":"부가가치세 일반과세자"},
@@ -2983,7 +2983,7 @@
 {"id":"7e75ab9da2a36bd7","name":"요튜(yogurt studio)","status":"계속사업자","tax":"부가가치세 일반과세자"},
 {"id":"7e875d136dc3deba","name":"레인메이커(주)","status":"계속사업자","tax":"부가가치세 일반과세자"},
 {"id":"7e8ade5195df09b7","name":"동시패션","status":"계속사업자","tax":"부가가치세 일반과세자"},
-{"id":"7eac2d77236176bf","name":"구름용(CLOUDDRAGON)","status":"휴업자","tax":"부가가치세 일반과세자"},
+{"id":"7eac2d77236176bf","name":"구름용(CLOUDDRAGON)","status":"계속사업자","tax":"부가가치세 일반과세자"},
 {"id":"7eac350a439220cf","name":"(주)스퀘어프로젝트","status":"폐업자","tax":"부가가치세 일반과세자","end":"20240319"},
 {"id":"7eb05853ee60db73","name":"(주)에버모델","status":"계속사업자","tax":"부가가치세 일반과세자"},
 {"id":"7eba84142da50062","name":"에버모어(주)","status":"계속사업자","tax":"부가가치세 일반과세자"},
